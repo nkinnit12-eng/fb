@@ -109,9 +109,97 @@ st.caption(
     "Business account, and Threads, all from one place."
 )
 
-tab_fb_auth, tab_fb_post, tab_ig, tab_threads = st.tabs(
-    ["Facebook: Verify Key/ID", "Facebook: Page Post", "Instagram: Post", "Threads: Post"]
+tab_derive, tab_fb_auth, tab_fb_post, tab_ig, tab_threads = st.tabs(
+    ["🔍 Derive from Page Token", "Facebook: Verify Key/ID", "Facebook: Page Post", "Instagram: Post", "Threads: Post"]
 )
+
+# ---------------------------------------------------------------------------
+# Tab 0: Derive everything possible from just a Page Access Token
+# ---------------------------------------------------------------------------
+with tab_derive:
+    st.subheader("Start from a Page Access Token")
+    st.write(
+        "Paste only your **Page Access Token** below. This will pull the "
+        "Page ID, the App ID it belongs to, and the linked Instagram "
+        "Business Account ID (if any) — everything the Graph API actually "
+        "lets you derive from a page token."
+    )
+
+    derive_token = st.text_input(
+        "Page Access Token", value=fb_page_token or "", type="password", key="derive_token"
+    )
+
+    if st.button("Look up everything I can from this token"):
+        if not derive_token:
+            st.warning("Paste a Page Access Token first.")
+        else:
+            # Step 1: /debug_token using the token itself as access_token.
+            # A page/user token can inspect itself this way without needing
+            # the app secret.
+            st.write("**Step 1: inspecting the token (`/debug_token`)**")
+            debug_url = f"{GRAPH_BASE}/{graph_version}/debug_token"
+            debug_resp = do_get(debug_url, {"input_token": derive_token, "access_token": derive_token})
+            debug_data = show_response(debug_resp, "debug_token") if debug_resp is not None else None
+
+            derived_app_id = None
+            derived_page_id = None
+            if debug_data and debug_resp.ok:
+                inner = debug_data.get("data", {})
+                derived_app_id = inner.get("app_id")
+                derived_page_id = inner.get("profile_id")  # the page this token acts as
+                if derived_app_id:
+                    st.success(f"App ID: {derived_app_id}")
+                if derived_page_id:
+                    st.success(f"Page ID: {derived_page_id}")
+                if inner.get("expires_at") == 0:
+                    st.info("This token does not expire (typical for a long-lived Page token).")
+
+            # Step 2: confirm page id/name via /me as a fallback / cross-check
+            st.write("**Step 2: confirming Page identity (`/me`)**")
+            me_resp = do_get(f"{GRAPH_BASE}/{graph_version}/me", {"access_token": derive_token, "fields": "id,name"})
+            me_data = show_response(me_resp, "/me") if me_resp is not None else None
+            if me_data and me_resp.ok:
+                derived_page_id = me_data.get("id", derived_page_id)
+
+            # Step 3: linked Instagram Business Account
+            st.write("**Step 3: linked Instagram Business Account (`/me?fields=instagram_business_account`)**")
+            if derived_page_id:
+                ig_resp = do_get(
+                    f"{GRAPH_BASE}/{graph_version}/{derived_page_id}",
+                    {"access_token": derive_token, "fields": "instagram_business_account{id,username}"},
+                )
+                ig_data = show_response(ig_resp, "instagram_business_account") if ig_resp is not None else None
+                if ig_data and ig_resp.ok and "instagram_business_account" in ig_data:
+                    igba = ig_data["instagram_business_account"]
+                    st.success(f"Instagram Business Account ID: {igba.get('id')} (@{igba.get('username')})")
+                elif ig_resp is not None and ig_resp.ok:
+                    st.warning(
+                        "No Instagram Business Account is linked to this Page. Link one in "
+                        "Meta Business Suite (Page Settings > Linked Accounts) to enable IG posting."
+                    )
+
+            st.markdown("---")
+            st.info(
+                "Copy the Page ID / App ID / Instagram Business Account ID shown above "
+                "into the sidebar fields, then use the other tabs to test posting."
+            )
+
+    st.markdown("---")
+    st.warning(
+        "**What a Page Access Token cannot give you — and why:**\n\n"
+        "- **App Secret**: never exposed by any Graph API endpoint, by design "
+        "(it's a server-side credential). Get it from "
+        "developers.facebook.com > Your App > Settings > Basic.\n"
+        "- **User Access Token**: a Page token is derived *from* a user token, "
+        "not the other way around — this direction can't be reversed. If you "
+        "need a user token, you'd log in again via the Facebook Login flow.\n"
+        "- **Threads User ID / Threads Access Token**: Threads has its own, "
+        "completely separate login system (Threads API / Threads Login) — "
+        "it is not part of the Facebook/Instagram Graph API and shares no "
+        "credentials with a Page token. You get a Threads token only by "
+        "completing the Threads OAuth flow at developers.facebook.com > "
+        "Threads product, using a Threads app ID/secret and redirect URI."
+    )
 
 # ---------------------------------------------------------------------------
 # Tab 1: Facebook token/id verification
