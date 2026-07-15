@@ -352,18 +352,32 @@ with tab_ig:
             if create_data and create_resp.ok and "id" in create_data:
                 container_id = create_data["id"]
 
-                # For video, Instagram needs time to process before publishing.
-                if ig_media_type == "Video/Reel":
-                    st.write("Waiting for video container to finish processing...")
-                    status_url = f"{GRAPH_BASE}/{graph_version}/{container_id}"
-                    for attempt in range(10):
-                        status_resp = do_get(status_url, {"fields": "status_code", "access_token": token_to_use})
-                        if status_resp is not None and status_resp.ok:
-                            status_code = status_resp.json().get("status_code")
-                            st.caption(f"Attempt {attempt + 1}: status = {status_code}")
-                            if status_code == "FINISHED":
-                                break
-                        time.sleep(5)
+                # Instagram processes containers asynchronously for both
+                # images and video — poll status_code until FINISHED (or
+                # ERROR / a max number of attempts) before publishing.
+                st.write("Waiting for media container to finish processing...")
+                status_url = f"{GRAPH_BASE}/{graph_version}/{container_id}"
+                max_attempts = 20 if ig_media_type == "Video/Reel" else 10
+                final_status = None
+                for attempt in range(max_attempts):
+                    status_resp = do_get(status_url, {"fields": "status_code,status", "access_token": token_to_use})
+                    if status_resp is not None and status_resp.ok:
+                        status_json = status_resp.json()
+                        final_status = status_json.get("status_code")
+                        st.caption(f"Attempt {attempt + 1}: status = {final_status} ({status_json.get('status', '')})")
+                        if final_status == "FINISHED":
+                            break
+                        if final_status == "ERROR":
+                            st.error("Instagram reported an ERROR processing this media — it cannot be published.")
+                            break
+                    time.sleep(3)
+
+                if final_status != "FINISHED":
+                    st.warning(
+                        f"Container status is '{final_status}', not 'FINISHED', after {max_attempts} checks. "
+                        "Publishing anyway, but this may fail with error 9007 — if so, wait a bit longer "
+                        "and try publishing again with the same container ID."
+                    )
 
                 st.write("**Step 2: publishing container...**")
                 publish_url = f"{GRAPH_BASE}/{graph_version}/{ig_user_id}/media_publish"
@@ -371,6 +385,34 @@ with tab_ig:
                 publish_resp = do_post(publish_url, params=publish_params)
                 if publish_resp is not None:
                     show_response(publish_resp, "publish result")
+
+    st.markdown("---")
+    st.subheader("Retry Publishing an Existing Container")
+    st.write(
+        "If a publish attempt failed with error 9007 ('media not ready'), "
+        "you don't need to recreate the container — just wait a bit and "
+        "retry publishing the same container ID here."
+    )
+    retry_container_id = st.text_input("Container ID (creation_id)", key="retry_container_id")
+    if st.button("Check status + Publish this Container ID"):
+        token_to_use = fb_page_token or fb_user_token
+        if not ig_user_id or not token_to_use:
+            st.warning("Instagram Business Account ID and an access token are required.")
+        elif not retry_container_id:
+            st.warning("Enter a container ID.")
+        else:
+            status_resp = do_get(
+                f"{GRAPH_BASE}/{graph_version}/{retry_container_id}",
+                {"fields": "status_code,status", "access_token": token_to_use},
+            )
+            if status_resp is not None:
+                show_response(status_resp, "container status")
+            publish_resp = do_post(
+                f"{GRAPH_BASE}/{graph_version}/{ig_user_id}/media_publish",
+                params={"creation_id": retry_container_id, "access_token": token_to_use},
+            )
+            if publish_resp is not None:
+                show_response(publish_resp, "publish result")
 
     st.markdown("---")
     st.subheader("Verify Instagram Account ID")
