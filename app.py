@@ -469,19 +469,34 @@ with tab_threads:
             if create_data and create_resp.ok and "id" in create_data:
                 container_id = create_data["id"]
 
-                if threads_media_type == "Video":
-                    st.write("Waiting for video container to finish processing...")
-                    status_url = f"{THREADS_BASE}/{threads_version}/{container_id}"
-                    for attempt in range(10):
-                        status_resp = do_get(
-                            status_url, {"fields": "status", "access_token": threads_access_token}
-                        )
-                        if status_resp is not None and status_resp.ok:
-                            status_code = status_resp.json().get("status")
-                            st.caption(f"Attempt {attempt + 1}: status = {status_code}")
-                            if status_code == "FINISHED":
-                                break
-                        time.sleep(5)
+                # Threads recommends waiting before publishing, even for
+                # text-only posts, to let the container fully register
+                # server-side. Poll status for all media types.
+                st.write("Waiting for Threads container to be ready...")
+                status_url = f"{THREADS_BASE}/{threads_version}/{container_id}"
+                max_attempts = 10 if threads_media_type == "Video" else 6
+                final_status = None
+                for attempt in range(max_attempts):
+                    status_resp = do_get(
+                        status_url, {"fields": "status,error_message", "access_token": threads_access_token}
+                    )
+                    if status_resp is not None and status_resp.ok:
+                        status_json = status_resp.json()
+                        final_status = status_json.get("status")
+                        st.caption(f"Attempt {attempt + 1}: status = {final_status}")
+                        if final_status == "FINISHED":
+                            break
+                        if final_status == "ERROR":
+                            st.error(f"Threads reported an error: {status_json.get('error_message')}")
+                            break
+                    time.sleep(5)
+
+                if final_status != "FINISHED":
+                    st.warning(
+                        f"Container status is '{final_status}', not 'FINISHED', after {max_attempts} checks. "
+                        "Publishing anyway — if this fails, wait longer and use the retry section below "
+                        "with this same container ID."
+                    )
 
                 st.write("**Step 2: publishing container...**")
                 publish_url = f"{THREADS_BASE}/{threads_version}/{threads_user_id}/threads_publish"
@@ -489,6 +504,33 @@ with tab_threads:
                 publish_resp = do_post(publish_url, params=publish_params)
                 if publish_resp is not None:
                     show_response(publish_resp, "publish result")
+
+    st.markdown("---")
+    st.subheader("Retry Publishing an Existing Container")
+    st.write(
+        "If publish failed with 'Media Not Found' or a not-ready error, "
+        "check the container's status and retry publishing the same ID "
+        "here — no need to recreate it."
+    )
+    retry_threads_container_id = st.text_input("Container ID (creation_id)", key="retry_threads_container_id")
+    if st.button("Check status + Publish this Threads Container ID"):
+        if not threads_user_id or not threads_access_token:
+            st.warning("Threads User ID and Threads Access Token are required.")
+        elif not retry_threads_container_id:
+            st.warning("Enter a container ID.")
+        else:
+            status_resp = do_get(
+                f"{THREADS_BASE}/{threads_version}/{retry_threads_container_id}",
+                {"fields": "status,error_message", "access_token": threads_access_token},
+            )
+            if status_resp is not None:
+                show_response(status_resp, "container status")
+            publish_resp = do_post(
+                f"{THREADS_BASE}/{threads_version}/{threads_user_id}/threads_publish",
+                params={"creation_id": retry_threads_container_id, "access_token": threads_access_token},
+            )
+            if publish_resp is not None:
+                show_response(publish_resp, "publish result")
 
     st.markdown("---")
     st.subheader("Verify Threads User ID / Token")
