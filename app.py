@@ -109,8 +109,9 @@ st.caption(
     "Business account, and Threads, all from one place."
 )
 
-tab_derive, tab_fb_auth, tab_fb_post, tab_ig, tab_threads = st.tabs(
-    ["🔍 Derive from Page Token", "Facebook: Verify Key/ID", "Facebook: Page Post", "Instagram: Post", "Threads: Post"]
+tab_derive, tab_fb_auth, tab_fb_post, tab_fb_video, tab_ig, tab_threads = st.tabs(
+    ["🔍 Derive from Page Token", "Facebook: Verify Key/ID", "Facebook: Page Post",
+     "Facebook: Video/Reel", "Instagram: Post", "Threads: Post"]
 )
 
 # ---------------------------------------------------------------------------
@@ -310,6 +311,149 @@ with tab_fb_post:
             resp = do_post(url, params=params)
             if resp is not None:
                 show_response(resp, "Page post result")
+
+# ---------------------------------------------------------------------------
+# Tab: Facebook Video / Reel post
+# ---------------------------------------------------------------------------
+with tab_fb_video:
+    st.subheader("Post a Video or Reel to a Facebook Page")
+    st.write(
+        "Regular videos use a simple one-call upload via `POST /{page-id}/videos`. "
+        "Reels use a separate 3-step flow: **start** a session, **wait** for "
+        "Facebook to finish processing the video, then **finish** (publish) it."
+    )
+
+    fb_video_type = st.radio("Post type", ["Regular Video", "Reel"], horizontal=True)
+    fb_video_url = st.text_input(
+        "Video URL (publicly accessible, direct link to the video file)", key="fb_video_url"
+    )
+    fb_video_desc = st.text_area("Description / caption", key="fb_video_desc")
+
+    if fb_video_type == "Regular Video":
+        if st.button("Post Regular Video"):
+            token_to_use = fb_page_token or fb_user_token
+            if not fb_page_id or not token_to_use:
+                st.warning("Page ID and a Page/User Access Token are required (see sidebar).")
+            elif not fb_video_url:
+                st.warning("Enter a video URL.")
+            else:
+                url = f"{GRAPH_BASE}/{graph_version}/{fb_page_id}/videos"
+                params = {
+                    "file_url": fb_video_url,
+                    "description": fb_video_desc,
+                    "access_token": token_to_use,
+                }
+                resp = do_post(url, params=params)
+                if resp is not None:
+                    show_response(resp, "Video post result")
+
+    else:  # Reel
+        if st.button("Start + Publish Reel"):
+            token_to_use = fb_page_token or fb_user_token
+            if not fb_page_id or not token_to_use:
+                st.warning("Page ID and a Page/User Access Token are required (see sidebar).")
+            elif not fb_video_url:
+                st.warning("Enter a video URL.")
+            else:
+                # Step 1: start the upload session, pointing at the hosted
+                # video URL so Facebook fetches it server-side (no local
+                # file upload needed from this app).
+                st.write("**Step 1: starting Reel upload session (`upload_phase=start`)...**")
+                start_url = f"{GRAPH_BASE}/{graph_version}/{fb_page_id}/video_reels"
+                start_params = {
+                    "upload_phase": "start",
+                    "file_url": fb_video_url,
+                    "access_token": token_to_use,
+                }
+                start_resp = do_post(start_url, params=start_params)
+                start_data = show_response(start_resp, "start phase") if start_resp is not None else None
+
+                video_id = None
+                if start_data and start_resp.ok:
+                    video_id = start_data.get("video_id")
+
+                if video_id:
+                    st.success(f"Video ID: {video_id}")
+
+                    # Step 2: poll processing status before publishing.
+                    st.write("**Step 2: waiting for Facebook to finish processing the video...**")
+                    status_url = f"{GRAPH_BASE}/{graph_version}/{video_id}"
+                    final_status = None
+                    for attempt in range(20):
+                        status_resp = do_get(
+                            status_url,
+                            {"fields": "status", "access_token": token_to_use},
+                        )
+                        if status_resp is not None and status_resp.ok:
+                            status_json = status_resp.json()
+                            video_status = (status_json.get("status") or {}).get("video_status")
+                            final_status = video_status
+                            st.caption(f"Attempt {attempt + 1}: video_status = {video_status}")
+                            if video_status == "ready":
+                                break
+                            if video_status == "error":
+                                st.error(f"Facebook reported an error processing this video: {status_json}")
+                                break
+                        time.sleep(5)
+
+                    if final_status != "ready":
+                        st.warning(
+                            f"Video status is '{final_status}', not 'ready', after 20 checks. "
+                            "Publishing anyway — if it fails, wait longer and retry with the same "
+                            "Video ID using the retry section below."
+                        )
+
+                    # Step 3: finish (publish) the reel.
+                    st.write("**Step 3: publishing the Reel (`upload_phase=finish`)...**")
+                    finish_url = f"{GRAPH_BASE}/{graph_version}/{fb_page_id}/video_reels"
+                    finish_params = {
+                        "upload_phase": "finish",
+                        "video_id": video_id,
+                        "video_state": "PUBLISHED",
+                        "description": fb_video_desc,
+                        "access_token": token_to_use,
+                    }
+                    finish_resp = do_post(finish_url, params=finish_params)
+                    if finish_resp is not None:
+                        show_response(finish_resp, "finish phase / publish result")
+
+        st.markdown("---")
+        st.subheader("Retry: Check Status / Finish an Existing Reel")
+        st.write(
+            "If a Reel upload succeeded (you have a Video ID) but publishing "
+            "failed or timed out, check its status or retry the finish step here."
+        )
+        retry_video_id = st.text_input("Video ID", key="retry_video_id")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Check Video Status"):
+                token_to_use = fb_page_token or fb_user_token
+                if not retry_video_id or not token_to_use:
+                    st.warning("Enter a Video ID and make sure a token is set.")
+                else:
+                    resp = do_get(
+                        f"{GRAPH_BASE}/{graph_version}/{retry_video_id}",
+                        {"fields": "status", "access_token": token_to_use},
+                    )
+                    if resp is not None:
+                        show_response(resp, "video status")
+        with col_b:
+            if st.button("Retry Finish (Publish)"):
+                token_to_use = fb_page_token or fb_user_token
+                if not (fb_page_id and retry_video_id and token_to_use):
+                    st.warning("Page ID, Video ID, and a token are all required.")
+                else:
+                    finish_url = f"{GRAPH_BASE}/{graph_version}/{fb_page_id}/video_reels"
+                    finish_params = {
+                        "upload_phase": "finish",
+                        "video_id": retry_video_id,
+                        "video_state": "PUBLISHED",
+                        "description": fb_video_desc,
+                        "access_token": token_to_use,
+                    }
+                    resp = do_post(finish_url, params=finish_params)
+                    if resp is not None:
+                        show_response(resp, "finish phase / publish result")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Instagram post
